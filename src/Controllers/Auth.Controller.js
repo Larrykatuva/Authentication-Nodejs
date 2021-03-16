@@ -47,7 +47,11 @@ module.exports = {
             });
             //If user does not exist create user
             if(!UserDetails){
-                req.body.password = Bcrypt.hashSync(req.body.password, 10);
+                const salt = Bcrypt.genSaltSync(10);
+                req.body.password = Bcrypt.hashSync(
+                    req.body.password, 
+                    salt
+                );
                 const user = new User(
                     req.body
                 );
@@ -60,11 +64,9 @@ module.exports = {
                         email: req.body.email
                     }
                     const access_token = await jwt.sign({user: data}, process.env.PRIVATE_KEY);
-                    console.log(access_token);
 
                     //preparing redirect url
                     const myURL = new URL('http://localhost:3000/auth/activate/'+result._id+'/'+access_token);
-                    console.log(myURL.href);
 
                     const transporter = nodemailer.createTransport({
                         service: 'gmail',
@@ -90,23 +92,20 @@ module.exports = {
                                 "Error when sending the email")
                             ); 
                         } else {
-                        console.log('Email sent: ' + info.response);
+                            res.status(200).send({
+                                error: false,
+                                message: "Email send successfully"
+                            });
                         }
                     });
 
-                    res.send(result);
+                    res.status(200).send({
+                        error: false,
+                        message: "Email send successfully"
+                    });
                 }
-
-
             }
             else{
-                //Generating access token
-                const access_token = await jwt.sign(req.body, process.env.PRIVATE_KEY);
-                console.log(access_token);
-
-                //preparing redirect url
-                const myURL = new URL('http://localhost:3000/auth/activate/'+access_token);
-                console.log(myURL.href);
                 next(createError(409, "Email already taken choose another one")); 
             }
         } catch (error){
@@ -129,30 +128,246 @@ module.exports = {
         const id = req.params.id;
         const token = req.params.token;
 
-        try{
-            const user = await User.findById(id);
-            if(!user){
-                throw createError(404, 'User does not exist');
+        jwt.verify(token, process.env.PRIVATE_KEY, (err, verifiedJwt) => {
+            if(err){
+                next(createError(400, "Token is invalid"));
             }else{
-                jwt.verify(token, process.env.PRIVATE_KEY, (err, verifiedJwt) => {
-                    if(err){
-                        next(createError(400, "Token is invalid"));
-                    }else{
-                        user.is_verified = true;
-                        const updates = user;
-                        const options = { new: true};
-                        const result = User.findByIdAndUpdate(id, updates, options);
-                        res.send(result);
+                try{
+                    const updates = {
+                        "is_verified": true
+                    }; 
+                    const options = { 
+                        new: true
+                    };
+                    User.findByIdAndUpdate(
+                        id, 
+                        updates,
+                        options)
+                        .exec(function (err, result){    
+                            res.status(200)
+                                .send({
+                                    error: false,
+                                    message: "Account activation successful"
+                                });
+                        });
+                } catch (error) {
+                    if(error instanceof mongoose.CastError) {
+                        next(createError(400, "User Id is invalid"));
+                        return;
+                    }
+                    next(error);
+                }
+            }
+        });
+    },
+
+    /**
+     * Login User
+     * Arguments: none
+     * Body: {email, password}
+     */
+    loginUser: async (req, res, next) => {
+        const {
+            body: { email, password }
+        } = req;
+        //If email not provided
+        if (!email) {
+            next(createError(
+                409, 
+                "Email must be provided")
+            ); 
+        }
+        //If username not provided
+        if (!password) {
+            next(createError(
+                409, 
+                "Password must be provided")
+            ); 
+        }
+        try{
+            //check if email exist
+            const user = await User.findOne({
+                email
+            });
+            //if no user found
+            if(!user){
+                next(createError(
+                    404,
+                    "Invalid user email"
+                ));
+            }
+            if(!user.is_verified){
+                next(createError(
+                    404,
+                    "User account is not activated"
+                ));
+                return;
+            }
+            if(user && Bcrypt.compareSync(
+                password, 
+                user.password
+                )){
+                const access_token = await jwt.sign(
+                    {user: user}, 
+                    process.env.PRIVATE_KEY
+                );
+                res.status(200).send({
+                    error: false,
+                    message: "Login successful",
+                    access_token: access_token,
+                    user: user,
+                });
+                return;
+            }
+            next(createError(
+                404,
+                "Incorrect user details"
+            ));
+        } catch (error){
+            next(createError(
+                422, 
+                error.message)
+            );
+        }
+    },
+
+    /**
+     * Reset user password link
+     * Arguments: none
+     * Body: {email}
+     */
+    resetPassword: async(req, res, next) => {
+        const {
+            body: {email }
+            } = req;
+        //If email not provided
+        if (!email) {
+            next(createError(
+                409, 
+                "Email must be provided")
+            ); 
+        }
+        try{
+            //check if user with email exist
+            const user = await User.findOne({
+                email
+            });
+            //if no user
+            if(!user){
+                next(createError(
+                    409, 
+                    "Email is invalid")
+                ); 
+            }
+            //if user exist
+            if(user){
+                //generate access-token
+                const access_token = await jwt.sign(
+                    {user: user}, 
+                    process.env.PRIVATE_KEY
+                );
+                //preparing redirect url
+                const myURL = new URL('http://localhost:3000/auth/new-password/'+user._id+'/'+access_token);
+
+                const transporter = nodemailer.createTransport({
+                    service: 'gmail',
+                    auth: {
+                    user: process.env.EMAIL,
+                    pass: process.env.EMAIL_PASS,
+                    }
+                });
+
+                var mailOptions = {
+                    from: process.env.EMAIL,
+                    to: email,
+                    subject: 'Account Activation',
+                    html: `
+                        <h2>Use this link to reset your password</h2>
+                        <p>${myURL.href}</p>`
+                };
+                transporter.sendMail(mailOptions, function(error, info){
+                    if (error) {
+                        next(createError(
+                            409, 
+                            "Error when sending the email")
+                        ); 
+                    } else {
+                        res.status(200).send({
+                            error: false,
+                            message: "Email send successfully"
+                        });
                     }
                 });
             }
 
-        } catch (error) {
-            if(error instanceof mongoose.CastError) {
-                next(createError(400, "User Id is invalid"));
-                return;
-            }
+        } catch (error){
+            next(createError(
+                422, 
+                error.message)
+            );
             next(error);
         }
+
+    },
+
+    /**
+     * Set new password
+     * Arguments: {user_id, access_token}
+     * Body: {password} 
+     */
+    setNewPassword: async (req, res, next) => {
+        const id = req.params.id;
+        const token = req.params.token;
+        const password = req.body.password;
+
+        if(!password){
+            next(createError(
+                    404,
+                    "Password must be provided"
+                )
+            );
+        }
+        if(password){
+            jwt.verify(token, process.env.PRIVATE_KEY, (err, verifiedJwt) => {
+                if(err){
+                    next(createError(
+                        400, 
+                        "Token is invalid"
+                ));
+                }else{
+                    try{
+                        const salt = Bcrypt.genSaltSync(10);
+                        newPassword = Bcrypt.hashSync(
+                            password, 
+                            salt
+                        );
+                        const updates = {
+                            "password": newPassword
+                        }; 
+                        const options = { 
+                            new: true
+                        };
+                        User.findByIdAndUpdate(
+                            id, 
+                            updates,
+                            options)
+                            .exec(function (err, result){    
+                                res.status(200)
+                                    .send({
+                                        error: false,
+                                        message: "Password reset successfully"
+                                    });
+                            });
+                    } catch (error) {
+                        if(error instanceof mongoose.CastError) {
+                            next(createError(400, "User Id is invalid"));
+                            return;
+                        }
+                        next(error);
+                    }
+                }
+            });
+        }
     }
+
 }
